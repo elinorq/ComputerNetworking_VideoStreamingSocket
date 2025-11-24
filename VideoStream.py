@@ -12,7 +12,6 @@ class VideoStream:
 		data = self.file.read(5) # Get the framelength from the first 5 bits
 		if data: 
 			framelength = int(data)
-							
 			# Read the current frame
 			data = self.file.read(framelength)
 			self.frameNum += 1

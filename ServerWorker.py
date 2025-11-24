@@ -5,6 +5,8 @@ from VideoStream import VideoStream
 from RtpPacket import RtpPacket
 
 class ServerWorker:
+	MAX_PAYLOAD_SIZE = 1400
+
 	SETUP = 'SETUP'
 	PLAY = 'PLAY'
 	PAUSE = 'PAUSE'
@@ -23,19 +25,25 @@ class ServerWorker:
 	
 	def __init__(self, clientInfo):
 		self.clientInfo = clientInfo
+		self.seqNum = 0
+
 		
 	def run(self):
 		threading.Thread(target=self.recvRtspRequest).start()
 	
 	def recvRtspRequest(self):
 		"""Receive RTSP request from the client."""
-		connSocket = self.clientInfo['rtspSocket'][0]
-		while True:            
-			data = connSocket.recv(256)
-			if data:
-				print("Data received:\n" + data.decode("utf-8"))
-				self.processRtspRequest(data.decode("utf-8"))
-	
+		try:
+			connSocket = self.clientInfo['rtspSocket'][0] # Đã accept() nên clientInfo là một tuple gồm Socket object và IP/Port
+			while True:            
+				data = connSocket.recv(1024)
+				if data:
+					print("Data received:\n" + data.decode("utf-8"))
+					self.processRtspRequest(data.decode("utf-8"))
+		except Exception as e:
+			print("Error in recvRstpRequest:", e)
+			traceback.print_exc()
+
 	def processRtspRequest(self, data):
 		"""Process RTSP request sent from the client."""
 		# Get the request type
@@ -68,7 +76,7 @@ class ServerWorker:
 				self.replyRtsp(self.OK_200, seq[1])
 				
 				# Get the RTP/UDP port from the last line
-				self.clientInfo['rtpPort'] = request[2].split(' ')[3]
+				self.clientInfo['rtpPort'] = int(request[2].split(' ')[2].split('=')[1])
 		
 		# Process PLAY request 		
 		elif requestType == self.PLAY:
@@ -107,8 +115,10 @@ class ServerWorker:
 			# Close the RTP socket
 			self.clientInfo['rtpSocket'].close()
 			
+			
+			
 	def sendRtp(self):
-		"""Send RTP packets over UDP."""
+		"""Send RTP packets over UDP and buffer them."""
 		while True:
 			self.clientInfo['event'].wait(0.05) 
 			
@@ -118,38 +128,67 @@ class ServerWorker:
 				
 			data = self.clientInfo['videoStream'].nextFrame()
 			if data: 
+
 				frameNumber = self.clientInfo['videoStream'].frameNbr()
+				frame_size = len(data)
+				payload_offset = 0
+
 				try:
-					address = self.clientInfo['rtspSocket'][1][0]
+					address = self.clientInfo['rtspSocket'][1][0] # server host (ip)
 					port = int(self.clientInfo['rtpPort'])
-					self.clientInfo['rtpSocket'].sendto(self.makeRtp(data, frameNumber),(address,port))
+
+					while (payload_offset < frame_size):
+						marker = 0
+
+						end_offset = payload_offset + self.MAX_PAYLOAD_SIZE
+
+						if end_offset >= frame_size:
+
+                        # Đây là gói cuối cùng của frame
+							end_offset = frame_size
+							marker = 1 # Đánh dấu gói cuối
+						
+						payload = data[payload_offset:end_offset]
+
+						# Tạo và gửi gói RTP
+                    	# Lưu ý: seqnum phải tăng cho mỗi gói RTP, không phải mỗi frame
+                    	# Chúng ta cần một bộ đếm sequence number toàn cục
+                   		# Giả sử chúng ta thêm self.rtpSeqNum = 0 trong __init__
+						   
+						rtpPacket = self.makeRtp(payload, frameNumber, marker)
+
+						self.clientInfo['rtpSocket'].sendto(rtpPacket.getPacket(),(address,port))
+
+						payload_offset = end_offset
 				except:
 					print("Connection Error")
 					#print('-'*60)
 					#traceback.print_exc(file=sys.stdout)
 					#print('-'*60)
-
-	def makeRtp(self, payload, frameNbr):
+	
+	def makeRtp(self, payload, frameNbr, marker):
 		"""RTP-packetize the video data."""
 		version = 2
 		padding = 0
 		extension = 0
 		cc = 0
-		marker = 0
 		pt = 26 # MJPEG type
-		seqnum = frameNbr
+
+		self.seqNum += 1
+		seqnum = self.seqNum
+
 		ssrc = 0 
-		
+		timestampForFrame = frameNbr
 		rtpPacket = RtpPacket()
 		
-		rtpPacket.encode(version, padding, extension, cc, seqnum, marker, pt, ssrc, payload)
+		rtpPacket.encode(version, padding, extension, cc, seqnum, marker, pt, ssrc, timestampForFrame, payload)
 		
-		return rtpPacket.getPacket()
+		return rtpPacket
 		
 	def replyRtsp(self, code, seq):
 		"""Send RTSP reply to the client."""
 		if code == self.OK_200:
-			#print("200 OK")
+			print("200 OK")
 			reply = 'RTSP/1.0 200 OK\nCSeq: ' + seq + '\nSession: ' + str(self.clientInfo['session'])
 			connSocket = self.clientInfo['rtspSocket'][0]
 			connSocket.send(reply.encode())
