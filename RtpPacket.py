@@ -46,6 +46,7 @@ class RtpPacket:
 		"""Return sequence (frame) number."""
 		seqNum = self.header[2] << 8 | self.header[3]
 		return int(seqNum)
+	
 	def marker(self):
 		"""Return Marker bit."""
 		return int((self.header[1] >> 7) & 1)

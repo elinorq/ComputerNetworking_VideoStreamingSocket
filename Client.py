@@ -19,11 +19,11 @@ class Client:
 	PLAY = 1
 	PAUSE = 2
 	TEARDOWN = 3
-	
+	FRAME_INTERVAL = 1/25
 
 	# === CÁC HẰNG SỐ CẤU HÌNH CHO BUFFER ===
-	PREBUFFER_SIZE = 10         # Số frame cần có trước khi bắt đầu phát
-	PREBUFFER_TIMEOUT = 5       # Thời gian tối đa (s) để chờ pre-buffer
+	PREBUFFER_SIZE = 20         # Số frame cần có trước khi bắt đầu phát
+	PREBUFFER_TIMEOUT = 3       # Thời gian tối đa (s) để chờ pre-buffer
 
 
 	# Initiation..
@@ -40,7 +40,6 @@ class Client:
 		self.requestSent = -1
 		self.teardownAcked = 0
 		self.connectToServer()
-
 
 		# === CÁC BIẾN QUẢN LÝ BUFFER VÀ TRẠNG THÁI ===
 		self.frameNbr = 1 # Frame video bắt đầu từ 1
@@ -86,8 +85,12 @@ class Client:
 	
 	def exitClient(self):
 		"""Teardown button handler."""
-		self.sendRtspRequest(self.TEARDOWN)		
+		self.sendRtspRequest(self.TEARDOWN)
+
+		self.playEvent.set()
+
 		self.master.destroy() # Close the gui window
+
 		cache_file = CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT
 		if os.path.exists(cache_file):
 			os.remove(cache_file) # Delete the cache image from video
@@ -95,51 +98,65 @@ class Client:
 	def pauseMovie(self):
 		"""Pause button handler."""
 		if self.state == self.PLAYING:
+
+			self.playEvent.set()
 			self.sendRtspRequest(self.PAUSE)
+
+			self.state = self.READY
 	
 	def playMovie(self):
 		"""Play button handler."""
 		if self.state == self.READY:
-
+			
 			# Create a new thread to listen for RTP packets
-			threading.Thread(target=self.listenRtp).start()
+			if not hasattr(self, 'listenThread') or not self.listenThread.is_alive():
+				self.listenThread = threading.Thread(target=self.listenRtp, daemon=True)
+				self.listenThread.start()
+
 			self.playEvent.clear()
+			
+			# Nếu luồng playFromBuffer chưa chạy, hãy khởi động nó
+			if not hasattr(self, 'playThread') or not self.playThread.is_alive():
+				self.playThread = threading.Thread(target=self.playFromBuffer, daemon=True)
+				self.playThread.start()
+
 			self.sendRtspRequest(self.PLAY)
+			self.state = self.PLAYING
 	
 	def playFromBuffer(self):
-		"""Play video from the jitter buffer"""
+		"""Play video from the frame buffer."""
 
-		while True:
-
-			if self.playEvent.isSet():
-					break
-			
-			if not self.frameBuffer:
-				time.sleep(0.01)
-				continue
+		while not self.playEvent.is_set():
 			try:
-				# Sắp xếp các frame trong buffer theo timestamp
+				if not self.frameBuffer:
+					time.sleep(0.02)
+					continue
+
+				# Logic tìm frame tiếp theo để phát (giữ nguyên)
 				ready_frames = sorted(self.frameBuffer.keys())
-				
-				# Chỉ phát các frame sau frame cuối cùng đã được phát
 				next_frames_to_play = [ts for ts in ready_frames if ts > self.lastPlayedFrame]
 				
 				if not next_frames_to_play:
-					time.sleep(0.01) # Chưa có frame mới, chờ
+					time.sleep(0.02) # Chưa có frame mới, chờ
 					continue
 
-				# Lấy frame có timestamp nhỏ nhất
 				timestamp_to_play = next_frames_to_play[0]
-				payload = self.frameBuffer.pop(timestamp_to_play)
 				
+				# Lấy frame và cập nhật giao diện
+				payload = self.frameBuffer.pop(timestamp_to_play)
 				self.updateMovie(self.writeFrame(payload))
 				self.lastPlayedFrame = timestamp_to_play
+				
+				# Điều chỉnh tốc độ phát
+				time.sleep(self.FRAME_INTERVAL)
 
-				# Điều chỉnh sleep để khớp với tốc độ video (ví dụ: 20fps ~ 50ms)
-				time.sleep(0.05) 
-			except Exception as e:
-				print(f"Error during playback: {e}")
-				pass
+			except:
+				# Upon receiving ACK for TEARDOWN request,
+				# close the RTP socket
+				if self.teardownAcked == 1:
+					self.rtpSocket.shutdown(socket.SHUT_RDWR)
+					self.rtpSocket.close()
+					break
 	
 	def listenRtp(self):		
 		"""Listen for RTP packets."""
@@ -172,14 +189,13 @@ class Client:
 						self.frameBuffer[timestamp] = full_frame_data
 
 						del self.rtpBuffer[timestamp]
+
+			# Stop listening upon requesting PAUSE or TEARDOWN	
 			except socket.timeout:
-				pass
+				if self.playEvent.isSet():
+					break
 
 			except:
-				# Stop listening upon requesting PAUSE or TEARDOWN
-				if self.playEvent.isSet(): 
-					break
-				
 				# Upon receiving ACK for TEARDOWN request,
 				# close the RTP socket
 				if self.teardownAcked == 1:
@@ -187,20 +203,20 @@ class Client:
 					self.rtpSocket.close()
 					break
 
-	def startPlaybackWithPrebuffering(self):
-		"""Waits for the buffer to fill up before starting playback."""
+	"""def startPlaybackWithPrebuffering(self):
+		Waits for the buffer to fill up before starting playback.
 
 		print(f"Pre-buffering... waiting for {self.PREBUFFER_SIZE} frames.")
 		startTime = time.time()
 
-		while len(self.rtpBuffer) < self.PREBUFFER_SIZE:
+		while len(self.frameBuffer) < self.PREBUFFER_SIZE:
 			if time.time() - startTime > self.PREBUFFER_TIMEOUT or self.playEvent.isSet():
 				break
 			time.sleep(0.1)
 
 		if not self.playEvent.isSet():
 			print("Buffer filled. Starting playback.")
-			threading.Thread(target=self.playFromBuffer).start()
+			threading.Thread(target=self.playFromBuffer, daemon=True).start()"""
 
 
 	def writeFrame(self, data):
@@ -231,7 +247,7 @@ class Client:
 		
 		# Setup request
 		if requestCode == self.SETUP and self.state == self.INIT:
-			threading.Thread(target=self.recvRtspReply).start()
+			threading.Thread(target=self.recvRtspReply, daemon=True).start()
 			self.rtspSeq += 1
 			request = f"SETUP {self.fileName} RTSP/1.0\n"
 			request += f"CSeq: {self.rtspSeq}\n"
@@ -275,16 +291,18 @@ class Client:
 		"""Receive RTSP reply from the server."""
 		while True:
 			reply = self.rtspSocket.recv(1024)
-			
+				
 			if reply:
 				self.parseRtspReply(reply.decode("utf-8"))
-			
+				
 			# Close the RTSP socket upon requesting Teardown
 			if self.requestSent == self.TEARDOWN:
+				self.pauseMovie()
 				self.rtspSocket.shutdown(socket.SHUT_RDWR)
 				self.rtspSocket.close()
 				break
-	
+
+
 	def parseRtspReply(self, data):
 		"""Parse the RTSP reply from the server."""
 
@@ -311,10 +329,9 @@ class Client:
 						# Open RTP port.
 						self.openRtpPort() 
 					elif self.requestSent == self.PLAY:
-
 						self.state = self.PLAYING
-						self.startPlaybackWithPrebuffering()
 
+						# Do khi sendRequest đã tiến hành play nên không cần làm gì nữa
 					elif self.requestSent == self.PAUSE:
 						self.state = self.READY
 						

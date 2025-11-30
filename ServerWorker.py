@@ -20,7 +20,8 @@ class ServerWorker:
 	OK_200 = 0
 	FILE_NOT_FOUND_404 = 1
 	CON_ERR_500 = 2
-	
+	FRAME_INTERVAL = 1/25
+
 	clientInfo = {}
 	
 	def __init__(self, clientInfo):
@@ -116,11 +117,10 @@ class ServerWorker:
 			self.clientInfo['rtpSocket'].close()
 			
 			
-			
 	def sendRtp(self):
 		"""Send RTP packets over UDP and buffer them."""
 		while True:
-			self.clientInfo['event'].wait(0.05) 
+			self.clientInfo['event'].wait(self.FRAME_INTERVAL) 
 			
 			# Stop sending if request is PAUSE or TEARDOWN
 			if self.clientInfo['event'].isSet(): 
@@ -129,7 +129,7 @@ class ServerWorker:
 			data = self.clientInfo['videoStream'].nextFrame()
 			if data: 
 
-				frameNumber = self.clientInfo['videoStream'].frameNbr()
+				frame_number = self.clientInfo['videoStream'].frameNbr()
 				frame_size = len(data)
 				payload_offset = 0
 
@@ -155,7 +155,7 @@ class ServerWorker:
                     	# Chúng ta cần một bộ đếm sequence number toàn cục
                    		# Giả sử chúng ta thêm self.rtpSeqNum = 0 trong __init__
 						   
-						rtpPacket = self.makeRtp(payload, frameNumber, marker)
+						rtpPacket = self.makeRtp(payload, frame_number, marker)
 
 						self.clientInfo['rtpSocket'].sendto(rtpPacket.getPacket(),(address,port))
 
